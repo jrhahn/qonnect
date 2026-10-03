@@ -1,53 +1,89 @@
 # qonnect
 
-A Qobuz Connect controller for Linux. Browse your Qobuz library in the browser, pick your Connect
-device, press play — the way Spotify Connect works.
+A Qobuz Connect controller you run yourself. Browse your Qobuz library, pick your streamer, press
+play — what the Qobuz app does on a phone, from a machine that has no Qobuz app.
 
-The audio never passes through this program. `qonnect` only tells the renderer what to play; the
-renderer fetches the stream from Qobuz itself, at full resolution, and keeps playing if you close
-the browser or suspend the machine.
+The audio never passes through qonnect. It only tells the streamer what to play; the streamer
+pulls the stream from Qobuz itself, at full resolution, and keeps playing when you close the page
+or suspend the machine.
 
-Built on the [`qobuz-connect`](https://github.com/ciaens/qobuz-connect) crate, whose protocol
-schema was lifted from the official web player. Unofficial, and not affiliated with Qobuz.
+Unofficial, and not affiliated with Qobuz. Built on the
+[`qobuz-connect`](https://github.com/ciaens/qobuz-connect) crate, whose protocol schema was
+lifted from the official web player.
 
-## Status
+## How it works
 
-Works: device list and selection, playlists, favourite albums, search, play a list from any
-track, play/pause, next/previous, seek, volume, live state from the renderer, finding devices on
-the LAN and handing them the session.
+Qobuz Connect has three parts, and the interesting one is invisible from outside.
 
-Not there yet: queue editing, shuffle and repeat, artist and label browsing.
+**The session** lives in the Qobuz cloud. Controllers and renderers connect to it over a
+WebSocket and agree on a queue, a position and which renderer is active. qonnect joins it as a
+controller, and as a renderer it never uses — joining always announces a device.
 
-**One catch, and it decides how you use this.** A device will join a session qonnect hands it,
-take its queue and obey every transport command — but it will not stream. It answers every track
-with `10001: Too many playback errors` and drops out. The tokens qonnect mints carry the app id
-of the Qobuz web player, which is no Qobuz Connect controller, and Qobuz appears to tie the right
-to stream on a user's behalf to the app the token belongs to. Signing in under another app id
-does not help: the code exchange needs that app's own `private_key`.
+**The renderer** is your streamer. A phone registers itself with the cloud on its own. A HEOS
+device, such as a Denon or Marantz, never does: it advertises `_qobuz-connect._tcp` on the LAN
+and waits for an app to walk up and hand it a session, together with the tokens to join it with.
+No app, no device — which is why a controller that only talks to the cloud sees nothing at all.
+qonnect does that LAN handshake itself.
 
-So pick the device once in the official Qobuz app. It hands the device tokens that do stream, the
-session belongs to your account rather than to either app, and qonnect drives it from there --
-its own queue, its own transport, everything below. qonnect never takes a device that is already
-in a session, exactly so it cannot replace those working tokens with its own.
+**The catalogue** is plain HTTP. qonnect reads your playlists, favourites and searches straight
+from the Qobuz API and sends the resulting track ids into the session. It never resolves a stream
+URL, because it never plays anything.
+
+```
+    your browser ──HTTP──► qonnect ──WebSocket──► Qobuz cloud session ◄──WebSocket── streamer
+                              │                                                          ▲
+                              ├──HTTP──► Qobuz API (playlists, search)                    │
+                              └──HTTP──► streamer on the LAN (hand over the session) ─────┘
+
+                                         audio: Qobuz ─────────────────────────────► streamer
+```
+
+## The catch
+
+A device will join a session qonnect hands it, take a queue and obey every transport command —
+and then refuse to play. Every track ends in `10001: Too many playback errors` and the device
+leaves. The tokens qonnect mints carry the app id of the Qobuz **web player**, which is not a
+Connect controller, and Qobuz appears to tie the right to stream on a user's behalf to the app a
+token was issued for. Signing in under another app id does not help: the code exchange needs that
+app's own `private_key`.
+
+So let the official Qobuz app hand the device its session once. It passes tokens that do stream.
+From then on qonnect drives that device completely — its own queue, its own transport — because
+the session is shared, not owned by either app. qonnect never takes over a device that is already
+in a session, precisely so it cannot replace the only tokens that work.
+
+If you know which app the native handover mints its tokens under, please open an issue.
+
+## Quick start
+
+```sh
+qonnect login          # browser sign-in, writes the config
+qonnect                # qonnect on http://127.0.0.1:7777
+```
+
+Open that address. Pick your device in the dropdown at the bottom right, click a playlist, click
+a track.
+
+The first time, and after the device has been off: open the Qobuz app on your phone, pick the
+device there and start anything. That is the handover from the catch above. Then put the phone
+away.
 
 ## Install
 
-Nix, natively, no container:
-
 ```sh
-nix run github:youruser/qonnect     # or, in a checkout:
+nix run github:jrhahn/qonnect        # or, in a checkout:
 nix build && ./result/bin/qonnect
 ```
 
-Without Nix, `cargo build --release` is enough. There are no C dependencies — TLS is rustls and
-the protobuf schema ships generated, so `protoc` is not needed.
+Without Nix, `cargo build --release`. No C dependencies: TLS is rustls, and the protobuf schema
+ships generated, so `protoc` is not needed either.
 
-Linux, macOS and Windows: nothing here is tied to one of them. Only Linux is tested, because that
-is the machine it was written on and the one with no Qobuz app of its own. The config lives at
-`$XDG_CONFIG_HOME/qonnect/config`, else `~/.config/qonnect/config`, else `%APPDATA%\qonnect\config`,
-and the sign-in opens a browser with whichever of `xdg-open`, `open` or `start` the system has.
+Linux, macOS and Windows: nothing here is tied to one of them, though only Linux is tested. The
+browser opens with whichever of `xdg-open`, `open` or `start` exists, and the config lives at
+`$XDG_CONFIG_HOME/qonnect/config`, else `~/.config/qonnect/config`, else
+`%APPDATA%\qonnect\config`.
 
-## Configure
+## Sign in
 
 ```sh
 qonnect login
@@ -55,16 +91,16 @@ qonnect login
 
 It reads the production app id out of the web player bundle, opens your browser at the Qobuz
 sign-in page, catches the redirect on a local port, trades the code for a user auth token and
-writes `~/.config/qonnect/config` with mode 600. Your password never passes through qonnect; the
-browser handles the sign-in, exactly as it does for the web player.
+writes the config with mode 600. Your password never passes through qonnect: the browser handles
+the sign-in, exactly as it does for the web player.
 
-Qobuz no longer accepts password logins over the API — `user/login` with an email and an md5
-answers `401 User authentication is required` for every shape of the request. The browser
-redirect is what the web player itself uses.
+Qobuz no longer accepts password logins over the API. `user/login` with an email and an md5
+answers `401 User authentication is required` for every shape of the request, so the browser
+redirect is the only way in — and it is what the web player itself uses.
 
 To skip the flow, take the two values out of the browser instead: open <https://play.qobuz.com>,
 developer tools, tab **Network**, pick a request to `www.qobuz.com/api.json/0.2/...` and copy the
-`X-App-Id` and `X-User-Auth-Token` request headers.
+`X-App-Id` and `X-User-Auth-Token` request headers into the config.
 
 ```ini
 app_id = 798273057
@@ -78,41 +114,74 @@ bind = 127.0.0.1:7777
 ```
 
 `QOBUZ_APP_ID`, `QOBUZ_USER_AUTH_TOKEN`, `QONNECT_RENDERER` and `QONNECT_BIND` override the file.
+The token is your account: keep the file to yourself, and out of any repository.
 
-The token is your account. Keep the file to yourself, and do not put it in a repository.
+## What works
 
-## Run
+Device discovery and selection, playlists, favourite albums, search, playing a list from any
+track, play and pause, next and previous, seek, volume, live position from the renderer, and the
+LAN handover.
 
-```sh
-qonnect
-# qonnect on http://127.0.0.1:7777
+Not yet: queue editing, shuffle and repeat, browsing by artist or label.
+
+## Things that cost us hours
+
+- **Auto standby.** A sleeping device still answers on the LAN and still accepts a handover. It
+  simply never joins and never plays. Turn auto standby off before you debug anything else.
+- **The session is not your account's.** Connect before the device and you land in a different
+  session and see no renderers at all. qonnect watches for this: when a device on the LAN reports
+  another session, it drops its own and joins again.
+- **One socket per token.** The cloud serves one connection per token. qonnect mints its own, so
+  it coexists with the phone app, but two copies of qonnect sharing a config will not.
+- **qonnect shows up as a device** in the official apps, because joining a session always
+  announces one. It will not play if you pick it there.
+- **A Varnish in front of Qobuz** answers some clients with `403 Forbidden` and a "Guru
+  Meditation" page, so both HTTP clients here send a browser user agent. A 403 in your own
+  browser is usually a stale cookie.
+- **HEOS firmware.** Denon and Marantz need a recent one before they speak Connect at all; on the
+  PM7000N, HEOS 3.67.460 or newer.
+- **Bind to localhost.** The server holds your credentials and authenticates nobody. On the LAN,
+  anything on the LAN can use your Qobuz account.
+
+## Protocol notes
+
+Measured against a Marantz PM7000N (HEOS 3.139.173, `sdk_version=1.1.0-b840`), in case they save
+somebody else the afternoon.
+
+The device advertises `_qobuz-connect._tcp` with `path`, `device_uuid`, `type` and
+`sdk_version` — and no `Name`, so a browser has to fall back to the mDNS instance name. Three
+calls live under that path: `GET get-display-info`, `GET get-connect-info` (which reports the
+session it is in, empty when it is in none) and `POST connect-to-qconnect`.
+
+The handover body is validated strictly. Both tokens need an `endpoint`, the expiry is in
+seconds, and any unknown field is answered with `400 Invalid request structure`:
+
+```json
+{
+  "session_id": "<session uuid, hyphenated>",
+  "jwt_qconnect": {"endpoint": "wss://qws-eu-prod.qobuz.com/ws", "jwt": "...", "exp": 1791018336},
+  "jwt_api": {"endpoint": "https://www.qobuz.com/api.json/0.2", "jwt": "...", "exp": 1791018336},
+  "become_active": true
+}
 ```
 
-Open that address. Your Connect devices appear in the dropdown at the bottom right as soon as
-they announce themselves.
+`jwt_qconnect` comes from `qws/createToken` with `jwt=jwt_qws`, the only value that endpoint
+accepts. `jwt_api` comes from `qws/refreshToken` with `jwt=jwt_api`; the user auth token is not a
+substitute, and a device given one holds the queue, reports itself as playing and sits at
+position zero forever.
 
-A HEOS device never registers itself with the Qobuz cloud. It advertises `_qobuz-connect._tcp` on
-the LAN and waits for an app to hand it a session, so qonnect looks for one and offers it the
-session -- but see the catch under Status: for playback, let the official app hand over first.
+An empty JSON body takes the device's HTTP server down for about ten seconds.
 
-A Denon or Marantz device with HEOS Built-in needs a current firmware before it speaks Qobuz
-Connect — on the PM7000N, HEOS firmware 3.67.460 or newer.
+## The code
 
-## Notes
-
-- **Auto standby.** A sleeping device still answers on the LAN and still accepts a handover; it
-  simply never joins and never plays. Hours of confusing symptoms come from this. Turn auto
-  standby off while testing.
-- **One token per socket.** The Qobuz cloud serves one connection per token. Running `qonnect`
-  and the Qobuz phone app on the same account at the same time will evict one of them.
-- **`qonnect` also announces itself as a renderer**, because joining a session always does. It
-  shows up in the official apps as a device named "qonnect" and will not play anything if you
-  pick it there.
-- **Qobuz sits behind a Varnish** that answers some clients with a `403 Forbidden` and a "Guru
-  Meditation" page. Both HTTP clients here send a browser user agent for that reason. A 403 in
-  your own browser is usually a stale cookie: reload hard, or clear the Qobuz cookies.
-- **Bind to localhost.** The server holds your credentials and does no authentication of its own.
-  If you expose it on the LAN, anything on the LAN can use your Qobuz account.
+| | |
+|---|---|
+| `src/qobuz.rs` | the Qobuz HTTP API: tokens and catalogue. Never resolves a stream URL |
+| `src/lan.rs` | the LAN handshake, from the app side: browse, then hand the session over |
+| `src/connect.rs` | one task owning the session, folding its events into the state the UI sees |
+| `src/login.rs` | the browser sign-in |
+| `src/main.rs` | config, HTTP routes, server-sent events |
+| `src/ui.html` | the page, compiled in, no assets to serve |
 
 ## License
 
