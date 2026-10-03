@@ -10,6 +10,20 @@ use serde_json::Value;
 
 const API: &str = "https://www.qobuz.com/api.json/0.2";
 
+/// A Qobuz Connect token with the expiry a device needs to be told about.
+pub struct Token {
+    pub endpoint: String,
+    pub jwt: String,
+    pub expires: u64,
+}
+
+fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("no {key} in the token"))
+}
+
 #[derive(Clone)]
 pub struct Qobuz {
     client: Client,
@@ -52,6 +66,46 @@ impl Qobuz {
             .await
             .map_err(|err| ConnectError::Token(err.to_string()))?;
         Credentials::from_json(&body)
+    }
+
+    /// The same token, with the expiry the LAN handshake has to pass on.
+    pub async fn connect_token(&self) -> Result<Token, String> {
+        let request = TokenRequest::new(&self.app_id, &self.user_auth_token);
+        let mut post = self
+            .client
+            .post(request.url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(request.body);
+        for (name, value) in &request.headers {
+            post = post.header(*name, value);
+        }
+        let body: Value = post
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|err| err.to_string())?
+            .json()
+            .await
+            .map_err(|err| err.to_string())?;
+        let token = body
+            .get("jwt_qws")
+            .ok_or_else(|| format!("no jwt_qws in the answer: {body}"))?;
+        Ok(Token {
+            endpoint: field(token, "endpoint")?.to_owned(),
+            jwt: field(token, "jwt")?.to_owned(),
+            expires: token
+                .get("exp")
+                .and_then(Value::as_u64)
+                .ok_or("no exp in the token")?,
+        })
+    }
+
+    pub fn user_auth_token(&self) -> &str {
+        &self.user_auth_token
+    }
+
+    pub fn client(&self) -> &Client {
+        &self.client
     }
 
     /// A GET against the API, returned as-is. The browser picks the fields it wants, so a change

@@ -2,6 +2,7 @@
 //! plays it. Audio never passes through this process.
 
 mod connect;
+mod lan;
 mod login;
 mod qobuz;
 
@@ -74,6 +75,7 @@ async fn main() {
         .route("/api/favorites", get(favorites))
         .route("/api/album/{id}", get(album))
         .route("/api/search", get(search))
+        .route("/api/discover", post(discover))
         .route("/api/renderer/{id}", post(renderer))
         .route("/api/play", post(play))
         .route("/api/transport", post(transport))
@@ -238,6 +240,12 @@ async fn search(AxumState(app): AxumState<App>, Query(query): Query<SearchQuery>
 }
 
 // --- playback ---------------------------------------------------------------------------------
+
+/// Looks for devices on the LAN again and hands each one the session.
+async fn discover(AxumState(app): AxumState<App>) -> impl IntoResponse {
+    app.session.send(Cmd::Discover);
+    StatusCode::ACCEPTED
+}
 
 async fn renderer(AxumState(app): AxumState<App>, Path(id): Path<i32>) -> impl IntoResponse {
     app.session

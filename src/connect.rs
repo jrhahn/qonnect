@@ -36,6 +36,8 @@ pub struct QueueItem {
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct State {
     pub connected: bool,
+    /// The session this controller is in, as the LAN handshake spells it.
+    pub session_id: Option<String>,
     pub renderers: Vec<Renderer>,
     pub active: Option<i32>,
     pub playing: bool,
@@ -134,6 +136,20 @@ impl State {
     }
 }
 
+/// A uuid as the LAN handshake spells it, `None` while the session has none yet.
+fn hyphenated(uuid: &[u8]) -> Option<String> {
+    let bytes: [u8; 16] = uuid.try_into().ok()?;
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut out = String::with_capacity(36);
+    for (at, char) in hex.chars().enumerate() {
+        if [8, 12, 16, 20].contains(&at) {
+            out.push('-');
+        }
+        out.push(char);
+    }
+    Some(out)
+}
+
 fn ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -142,6 +158,8 @@ fn ms(duration: Duration) -> u64 {
 #[derive(Debug)]
 pub enum Cmd {
     Control(ControllerCommand),
+    /// Look for devices on the LAN and hand each one this session.
+    Discover,
     Next,
     Previous,
     /// Replaces the queue and starts at `position`.
@@ -204,6 +222,10 @@ async fn run(
         };
         let _ = state_tx.send(Arc::new(state.clone()));
         let _ = session.ask_queue_state();
+        // Which queue item to start once the server has assigned the ids.
+        let mut start_at: Option<u32> = None;
+        // A device that is asleep answers the handover and never joins, so keep offering it.
+        let mut sweep = tokio::time::interval(Duration::from_secs(30));
 
         loop {
             tokio::select! {
@@ -212,6 +234,16 @@ async fn run(
                     tracing::debug!(?event);
                     let known = state.active;
                     state.apply(&event);
+                    state.session_id = hyphenated(session.session_uuid());
+
+                    // LoadTracks only fills the queue; the chosen track still has to be started,
+                    // and its queue item id only exists once the server has answered.
+                    if let (Some(index), Event::Queue(QueueEvent::Loaded(_))) = (start_at, &event) {
+                        start_at = None;
+                        if let Some(item) = state.queue.get(index as usize) {
+                            let _ = session.control(jump(item.queue_item_id));
+                        }
+                    }
                     // Pick up where the last run left off, the way Spotify Connect remembers.
                     if known.is_none() && state.active.is_none() {
                         if let (Some(wanted), Event::Renderer(RendererEvent::Added { id, device })) =
@@ -224,19 +256,34 @@ async fn run(
                     }
                     let _ = state_tx.send(Arc::new(state.clone()));
                 }
+                // A LAN device stays invisible until it is handed the session.
+                _ = sweep.tick(), if state.renderers.is_empty() => {
+                    if let Some(session_id) = state.session_id.clone() {
+                        spawn_handover(qobuz.clone(), session_id);
+                    }
+                }
                 cmd = rx.recv() => {
                     let Some(cmd) = cmd else { return };
                     let command = match cmd {
                         Cmd::Control(command) => Some(command),
                         Cmd::Next => state.step(1).map(jump),
                         Cmd::Previous => state.step(-1).map(jump),
-                        Cmd::Play { track_ids, position } => Some(ControllerCommand::LoadTracks {
-                            track_ids,
-                            position,
-                            shuffle_seed: None,
-                            shuffle_pivot_index: None,
-                            autoplay: Autoplay::default(),
-                        }),
+                        Cmd::Discover => {
+                            if let Some(session_id) = state.session_id.clone() {
+                                spawn_handover(qobuz.clone(), session_id);
+                            }
+                            None
+                        }
+                        Cmd::Play { track_ids, position } => {
+                            start_at = Some(position);
+                            Some(ControllerCommand::LoadTracks {
+                                track_ids,
+                                position,
+                                shuffle_seed: None,
+                                shuffle_pivot_index: None,
+                                autoplay: Autoplay::default(),
+                            })
+                        }
                     };
                     if let Some(command) = command {
                         if let Err(err) = session.control(command) {
@@ -251,6 +298,26 @@ async fn run(
         let _ = state_tx.send(Arc::new(State::default()));
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
+}
+
+/// Hands every device on the LAN this session, in the background: browsing takes seconds and
+/// the session must keep reading its events meanwhile.
+fn spawn_handover(qobuz: Qobuz, session_id: String) {
+    tokio::spawn(async move {
+        match crate::lan::browse(Duration::from_secs(4)).await {
+            Ok(devices) if devices.is_empty() => {
+                tracing::info!("no Qobuz Connect devices on the LAN");
+            }
+            Ok(devices) => {
+                for device in devices {
+                    if let Err(err) = crate::lan::hand_over(&qobuz, &device, &session_id).await {
+                        tracing::warn!("{err}");
+                    }
+                }
+            }
+            Err(err) => tracing::warn!("{err}"),
+        }
+    });
 }
 
 /// Start a queue item from its beginning.
@@ -348,6 +415,12 @@ mod tests {
     #[test]
     fn follows_a_renderer_through_a_queue() {
         let mut state = State::default();
+        assert_eq!(hyphenated(&[0x12, 0x34]), None);
+        assert_eq!(
+            hyphenated(&[0x0a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x60, 0x71,
+                         0x82, 0x93, 0xa4, 0xb5, 0xc6, 0xd7, 0xe8, 0xf9]).as_deref(),
+            Some("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9")
+        );
         state.apply(&renderer(7, "Marantz PM7000N"));
         assert_eq!(state.renderers.len(), 1);
 
