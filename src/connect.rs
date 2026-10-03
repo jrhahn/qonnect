@@ -243,7 +243,7 @@ async fn run(
                     tracing::debug!(?event);
                     let known = state.active;
                     state.apply(&event);
-                    if !state.renderers.is_empty() {
+                    if matches!(event, Event::Renderer(RendererEvent::Added { .. })) {
                         backoff = FIRST_RETRY;
                     }
                     state.session_id = hyphenated(session.session_uuid());
@@ -273,8 +273,10 @@ async fn run(
                         let _ = session.ask_renderer_state(id);
                     }
                 }
-                // A LAN device stays invisible until it is handed the session.
-                () = tokio::time::sleep_until(retry_at), if state.renderers.is_empty() => {
+                // A LAN device stays invisible until it is handed the session. Other renderers
+                // being present says nothing about it: a phone registers itself with the cloud,
+                // a HEOS device never does.
+                () = tokio::time::sleep_until(retry_at) => {
                     if let Some(session_id) = state.session_id.clone() {
                         spawn_handover(qobuz.clone(), session_id);
                     }
@@ -295,6 +297,8 @@ async fn run(
                         }
                         Cmd::Play { track_ids, position } => {
                             start_at = Some(position);
+                            // Whatever went wrong last time is not this track's problem.
+                            state.message = None;
                             Some(ControllerCommand::LoadTracks {
                                 track_ids,
                                 position,

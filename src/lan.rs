@@ -14,7 +14,7 @@ use crate::qobuz::Qobuz;
 
 const SERVICE: &str = "_qobuz-connect._tcp.local.";
 /// Where the device should talk to the Qobuz API with the token we hand it.
-const API_ENDPOINT: &str = "https://www.qobuz.com/api.json/0.2/";
+const API_ENDPOINT: &str = "https://www.qobuz.com/api.json/0.2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Device {

@@ -47,7 +47,8 @@ async fn main() {
             eprintln!("no HOME and no XDG_CONFIG_HOME, nowhere to write the config");
             std::process::exit(1);
         };
-        if let Err(err) = login::run(&path).await {
+        let wanted = std::env::args().nth(2);
+        if let Err(err) = login::run(&path, wanted).await {
             eprintln!("{err}");
             std::process::exit(1);
         }

@@ -29,14 +29,26 @@ const PRIVATE_KEY: &str = "6lz8C03UDIC7";
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
 
-pub async fn run(config: &Path) -> Result<(), String> {
+/// `wanted` signs in under a given app id instead of the web player's. The app id decides what
+/// a token may do: the one in the bundle drives the web player, which is no Qobuz Connect
+/// controller, and a device may well refuse to stream for it.
+pub async fn run(config: &Path, wanted: Option<String>) -> Result<(), String> {
     let client = Client::builder()
         .user_agent(USER_AGENT)
         .build()
         .map_err(|err| err.to_string())?;
 
-    let app_id = app_id(&client).await?;
-    println!("app id {app_id}, from the web player bundle");
+    let app_id = match wanted {
+        Some(app_id) => {
+            println!("app id {app_id}, as given");
+            app_id
+        }
+        None => {
+            let app_id = app_id(&client).await?;
+            println!("app id {app_id}, from the web player bundle");
+            app_id
+        }
+    };
 
     let (code, redirect) = authorize(&app_id).await?;
     let token = exchange(&client, &app_id, &code, &redirect).await?;
