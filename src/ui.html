@@ -82,6 +82,7 @@ const clock = ms => {
 // Track metadata lives here only: the session speaks track ids, the browser knows the names.
 let listed = [];       // what is shown in the main pane, in order
 let state = {};        // last session state from the server
+let listedDevices = '';// what the device dropdown currently lists
 let shown = 0;         // position extrapolated between reports
 let reportedAt = 0;
 
@@ -158,11 +159,15 @@ new EventSource('/api/events').onmessage = message => {
   shown = state.position_ms;
   reportedAt = performance.now();
 
-  if ($('renderers').value !== String(state.active ?? '')) {
+  // Rebuild on any change of the list itself, not only when the active one changes: with no
+  // active renderer the select would otherwise sit on "no device" while devices are there.
+  const devices = JSON.stringify(state.renderers);
+  if (devices !== listedDevices) {
+    listedDevices = devices;
     $('renderers').replaceChildren(...[{ id: '', name: 'no device' }, ...state.renderers]
       .map(renderer => new Option(renderer.name, renderer.id)));
-    $('renderers').value = String(state.active ?? '');
   }
+  $('renderers').value = String(state.active ?? '');
   $('toggle').innerHTML = state.playing ? '&#10073;&#10073;' : '&#9654;';
   if (state.volume != null) $('volume').value = state.volume;
   $('status').textContent = state.message ?? (state.connected ? 'connected' : 'reconnecting…');

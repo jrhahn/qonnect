@@ -78,11 +78,16 @@ async fn in_session(qobuz: &Qobuz, device: &Device) -> Option<String> {
     (!id.is_empty()).then(|| id.to_owned())
 }
 
-/// Hands a device the session and the tokens to join it with.
+/// Hands a device the session and the tokens to join it with, and answers with the session the
+/// device is in instead, when it is in another one.
 ///
 /// The device validates the body strictly: both tokens need an endpoint, the expiry is in
 /// seconds, and any field it does not know makes it answer `400 Invalid request structure`.
-pub async fn hand_over(qobuz: &Qobuz, device: &Device, session_id: &str) -> Result<(), String> {
+pub async fn hand_over(
+    qobuz: &Qobuz,
+    device: &Device,
+    session_id: &str,
+) -> Result<Option<String>, String> {
     // Never take a device that is already in a session. Our tokens come from the web player,
     // which is no Qobuz Connect controller: a device holding them joins, fails every stream with
     // "Too many playback errors" and drops out. A device that an official app has handed a
@@ -90,7 +95,7 @@ pub async fn hand_over(qobuz: &Qobuz, device: &Device, session_id: &str) -> Resu
     // leave it alone and control it as it is.
     if let Some(current) = in_session(qobuz, device).await {
         tracing::debug!(name = %device.name, session = %current, "already in a session");
-        return Ok(());
+        return Ok((current != session_id).then_some(current));
     }
     let token = qobuz.connect_token().await?;
     let api = qobuz.api_token().await?;
@@ -122,7 +127,7 @@ pub async fn hand_over(qobuz: &Qobuz, device: &Device, session_id: &str) -> Resu
     let body = response.text().await.unwrap_or_default();
     if status.is_success() {
         tracing::info!(name = %device.name, "handed the session over");
-        Ok(())
+        Ok(None)
     } else {
         Err(format!("{} refused the session ({status}): {body}", device.name))
     }

@@ -165,6 +165,8 @@ pub enum Cmd {
     Control(ControllerCommand),
     /// Look for devices on the LAN and hand each one this session.
     Discover,
+    /// Drop this session and join whichever one the server has now.
+    Rejoin,
     Next,
     Previous,
     /// Replaces the queue and starts at `position`.
@@ -187,7 +189,7 @@ impl Handle {
 pub fn spawn(qobuz: Qobuz, prefer: Option<String>) -> Handle {
     let (tx, rx) = mpsc::unbounded_channel();
     let (state_tx, state_rx) = watch::channel(Arc::new(State::default()));
-    tokio::spawn(run(qobuz, prefer, rx, state_tx));
+    tokio::spawn(run(qobuz, prefer, tx.clone(), rx, state_tx));
     Handle {
         tx,
         state: state_rx,
@@ -197,6 +199,7 @@ pub fn spawn(qobuz: Qobuz, prefer: Option<String>) -> Handle {
 async fn run(
     qobuz: Qobuz,
     prefer: Option<String>,
+    tx: mpsc::UnboundedSender<Cmd>,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     state_tx: watch::Sender<Arc<State>>,
 ) {
@@ -278,7 +281,7 @@ async fn run(
                 // a HEOS device never does.
                 () = tokio::time::sleep_until(retry_at) => {
                     if let Some(session_id) = state.session_id.clone() {
-                        spawn_handover(qobuz.clone(), session_id);
+                        spawn_handover(qobuz.clone(), session_id, tx.clone());
                     }
                     retry_at = tokio::time::Instant::now() + backoff;
                     backoff = (backoff * 2).min(LAST_RETRY);
@@ -291,10 +294,14 @@ async fn run(
                         Cmd::Previous => state.step(-1).map(jump),
                         Cmd::Discover => {
                             if let Some(session_id) = state.session_id.clone() {
-                                spawn_handover(qobuz.clone(), session_id);
+                                spawn_handover(qobuz.clone(), session_id, tx.clone());
                             }
                             None
                         }
+                        // The server puts a joining controller in the session that is running,
+                        // so dropping this one and joining again is how to follow a device into
+                        // the session an official app put it in.
+                        Cmd::Rejoin => break,
                         Cmd::Play { track_ids, position } => {
                             start_at = Some(position);
                             // Whatever went wrong last time is not this track's problem.
@@ -325,7 +332,7 @@ async fn run(
 
 /// Hands every device on the LAN this session, in the background: browsing takes seconds and
 /// the session must keep reading its events meanwhile.
-fn spawn_handover(qobuz: Qobuz, session_id: String) {
+fn spawn_handover(qobuz: Qobuz, session_id: String, tx: mpsc::UnboundedSender<Cmd>) {
     tokio::spawn(async move {
         match crate::lan::browse(Duration::from_secs(4)).await {
             Ok(devices) if devices.is_empty() => {
@@ -333,8 +340,17 @@ fn spawn_handover(qobuz: Qobuz, session_id: String) {
             }
             Ok(devices) => {
                 for device in devices {
-                    if let Err(err) = crate::lan::hand_over(&qobuz, &device, &session_id).await {
-                        tracing::warn!("{err}");
+                    match crate::lan::hand_over(&qobuz, &device, &session_id).await {
+                        Ok(Some(other)) => {
+                            tracing::info!(
+                                name = %device.name, session = %other,
+                                "device is in another session, joining that one"
+                            );
+                            let _ = tx.send(Cmd::Rejoin);
+                            return;
+                        }
+                        Ok(None) => {}
+                        Err(err) => tracing::warn!("{err}"),
                     }
                 }
             }
