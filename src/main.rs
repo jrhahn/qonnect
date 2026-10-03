@@ -5,6 +5,7 @@ mod connect;
 mod lan;
 mod login;
 mod qobuz;
+mod tui;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -65,6 +66,15 @@ async fn main() {
 
     let qobuz = Qobuz::new(config.app_id, config.user_auth_token);
     let session = connect::spawn(qobuz.clone(), config.renderer);
+
+    // The terminal is the default front end; the page is there for the other rooms.
+    if std::env::args().nth(1).as_deref() != Some("serve") {
+        if let Err(err) = tui::run(qobuz, session).await {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let app = App { qobuz, session };
 
     let router = Router::new()

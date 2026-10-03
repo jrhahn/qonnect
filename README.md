@@ -58,15 +58,31 @@ If you know which app the native handover mints its tokens under, please open an
 
 ```sh
 qonnect login          # browser sign-in, writes the config
-qonnect                # qonnect on http://127.0.0.1:7777
+qonnect                # the terminal UI
+qonnect serve          # the same thing as a page on http://127.0.0.1:7777
 ```
-
-Open that address. Pick your device in the dropdown at the bottom right, click a playlist, click
-a track.
 
 The first time, and after the device has been off: open the Qobuz app on your phone, pick the
 device there and start anything. That is the handover from the catch above. Then put the phone
 away.
+
+```
+ qonnect — Marantz PM7000N
+┌ Playlists and albums ──────┐┌ Amore — Wanda ───────────────────────────────────┐
+│▸ 80er-Pop-Hits             ││   1. Bologna                 Wanda           4:21 │
+│  Jazz at Night             ││ ▸ 2. Columbo                 Wanda           3:47 │
+│  Wanda — Amore             ││   3. Niente                  Wanda           3:12 │
+└────────────────────────────┘└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│████████████████  ▶ Columbo · Wanda   1:28 / 3:47   ♪ 20                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+ ␣ play  n/p track  ←→ seek  +/- volume  d device  r rescan  / search  q quit
+```
+
+`Tab` switches panes, `Enter` opens a playlist or starts a track and everything after it, `d`
+steps through the devices in the session.
+
+The page is the same core with a different front end — handy from another room, or a phone.
 
 ## Install
 
@@ -120,7 +136,7 @@ The token is your account: keep the file to yourself, and out of any repository.
 
 Device discovery and selection, playlists, favourite albums, search, playing a list from any
 track, play and pause, next and previous, seek, volume, live position from the renderer, and the
-LAN handover.
+LAN handover — from the terminal or from the page, whichever you start.
 
 Not yet: queue editing, shuffle and repeat, browsing by artist or label.
 
@@ -180,6 +196,7 @@ An empty JSON body takes the device's HTTP server down for about ten seconds.
 | `src/lan.rs` | the LAN handshake, from the app side: browse, then hand the session over |
 | `src/connect.rs` | one task owning the session, folding its events into the state the UI sees |
 | `src/login.rs` | the browser sign-in |
+| `src/tui.rs` | the terminal UI, on the same core |
 | `src/main.rs` | config, HTTP routes, server-sent events |
 | `src/ui.html` | the page, compiled in, no assets to serve |
 
