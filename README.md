@@ -15,8 +15,7 @@ schema was lifted from the official web player. Unofficial, and not affiliated w
 Works: device list and selection, playlists, favourite albums, search, play a list from any
 track, play/pause, next/previous, seek, volume, live state from the renderer.
 
-Not there yet: login (you supply a token, see below), queue editing, shuffle and repeat, artist
-and label browsing, LAN discovery.
+Not there yet: queue editing, shuffle and repeat, artist and label browsing, LAN discovery.
 
 ## Install
 
@@ -32,18 +31,20 @@ the protobuf schema ships generated, so `protoc` is not needed.
 
 ## Configure
 
-`qonnect` needs two values that every Qobuz client sends on every API call: an app id and your
-user auth token.
+```sh
+qonnect login
+```
 
-1. Open <https://play.qobuz.com> and log in.
-2. Open the browser developer tools, tab **Network**.
-3. Click anything in the player, then pick a request to `www.qobuz.com/api.json/0.2/…`.
-4. Under **Request Headers**, copy `X-App-Id` and `X-User-Auth-Token`.
+It reads the production app id out of the web player bundle, asks for your email and password,
+and writes `~/.config/qonnect/config` with mode 600. Only the token is stored; the password is
+not kept.
 
-Put them in `~/.config/qonnect/config`:
+If you would rather not hand over the password, take the two values from the browser instead:
+open <https://play.qobuz.com>, developer tools, tab **Network**, pick a request to
+`www.qobuz.com/api.json/0.2/...` and copy the `X-App-Id` and `X-User-Auth-Token` request headers.
 
 ```ini
-app_id = 123456789
+app_id = 798273057
 user_auth_token = ey...
 
 # Optional: make this renderer active as soon as it appears, by name.
@@ -55,8 +56,7 @@ bind = 127.0.0.1:7777
 
 `QOBUZ_APP_ID`, `QOBUZ_USER_AUTH_TOKEN`, `QONNECT_RENDERER` and `QONNECT_BIND` override the file.
 
-The token is your account. Keep the file to yourself (`chmod 600`), and do not put it in a
-repository.
+The token is your account. Keep the file to yourself, and do not put it in a repository.
 
 ## Run
 
@@ -78,6 +78,9 @@ Connect — on the PM7000N, HEOS firmware 3.67.460 or newer.
 - **`qonnect` also announces itself as a renderer**, because joining a session always does. It
   shows up in the official apps as a device named "qonnect" and will not play anything if you
   pick it there.
+- **Qobuz sits behind a Varnish** that answers some clients with a `403 Forbidden` and a "Guru
+  Meditation" page. Both HTTP clients here send a browser user agent for that reason. A 403 in
+  your own browser is usually a stale cookie: reload hard, or clear the Qobuz cookies.
 - **Bind to localhost.** The server holds your credentials and does no authentication of its own.
   If you expose it on the LAN, anything on the LAN can use your Qobuz account.
 

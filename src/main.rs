@@ -2,6 +2,7 @@
 //! plays it. Audio never passes through this process.
 
 mod connect;
+mod login;
 mod qobuz;
 
 use std::collections::HashMap;
@@ -40,10 +41,22 @@ async fn main() {
         )
         .init();
 
+    if std::env::args().nth(1).as_deref() == Some("login") {
+        let Some(path) = Config::path() else {
+            eprintln!("no HOME and no XDG_CONFIG_HOME, nowhere to write the config");
+            std::process::exit(1);
+        };
+        if let Err(err) = login::run(&path).await {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let config = match Config::load() {
         Ok(config) => config,
         Err(err) => {
-            eprintln!("{err}\n\nSee the README: qonnect needs a Qobuz app id and user auth token.");
+            eprintln!("{err}\n\nRun `qonnect login` to write one, or see the README.");
             std::process::exit(1);
         }
     };

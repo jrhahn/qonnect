@@ -20,7 +20,12 @@ pub struct Qobuz {
 impl Qobuz {
     pub fn new(app_id: String, user_auth_token: String) -> Self {
         Self {
-            client: Client::new(),
+            // Qobuz sits behind a Varnish that answers some clients with a 403; look like the
+            // browser its web player runs in.
+            client: Client::builder()
+                .user_agent(crate::login::USER_AGENT)
+                .build()
+                .unwrap_or_default(),
             app_id,
             user_auth_token,
         }
