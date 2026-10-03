@@ -101,9 +101,9 @@ async fn authorize(app_id: &str) -> Result<(String, String), String> {
 
 type Sender = std::sync::Arc<std::sync::Mutex<Option<oneshot::Sender<Result<String, String>>>>>;
 
-/// What Qobuz redirects the browser to once the user has signed in. Takes the code under any of
-/// the names it has been seen under, and asks the browser for the fragment when the query has
-/// nothing, since a `#code=...` never reaches a server on its own.
+/// What Qobuz redirects the browser to once the user has signed in. Qobuz calls the code
+/// `code_autorisation`; the other names are there in case that changes. When the query holds
+/// nothing, ask the browser for the fragment, since a `#code=...` never reaches a server.
 async fn callback(
     State(sender): State<Sender>,
     uri: axum::http::Uri,
@@ -111,7 +111,7 @@ async fn callback(
 ) -> axum::response::Response {
     println!("redirect: {uri}");
 
-    if let Some(code) = ["code", "authorization_code", "auth_code", "token"]
+    if let Some(code) = ["code_autorisation", "code", "authorization_code", "auth_code"]
         .iter()
         .find_map(|key| query.get(*key))
     {
@@ -138,7 +138,8 @@ async fn callback(
 /// A fragment never reaches the server, so let the browser replay it as a query.
 const FRAGMENT_BOUNCE: &str = r"<title>qonnect</title><p>Signing in…<script>
 const hash = location.hash.slice(1);
-location.replace(location.pathname + '?qonnect_fragment=1' + (hash ? '&' + hash : ''));
+const query = location.search ? location.search + '&' : '?';
+location.replace(location.pathname + query + 'qonnect_fragment=1' + (hash ? '&' + hash : ''));
 </script>";
 
 fn finish(sender: &Sender, result: Result<String, String>) {
