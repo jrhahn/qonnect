@@ -13,9 +13,22 @@ schema was lifted from the official web player. Unofficial, and not affiliated w
 ## Status
 
 Works: device list and selection, playlists, favourite albums, search, play a list from any
-track, play/pause, next/previous, seek, volume, live state from the renderer.
+track, play/pause, next/previous, seek, volume, live state from the renderer, finding devices on
+the LAN and handing them the session.
 
-Not there yet: queue editing, shuffle and repeat, artist and label browsing, LAN discovery.
+Not there yet: queue editing, shuffle and repeat, artist and label browsing.
+
+**One catch, and it decides how you use this.** A device will join a session qonnect hands it,
+take its queue and obey every transport command — but it will not stream. It answers every track
+with `10001: Too many playback errors` and drops out. The tokens qonnect mints carry the app id
+of the Qobuz web player, which is no Qobuz Connect controller, and Qobuz appears to tie the right
+to stream on a user's behalf to the app the token belongs to. Signing in under another app id
+does not help: the code exchange needs that app's own `private_key`.
+
+So pick the device once in the official Qobuz app. It hands the device tokens that do stream, the
+session belongs to your account rather than to either app, and qonnect drives it from there --
+its own queue, its own transport, everything below. qonnect never takes a device that is already
+in a session, exactly so it cannot replace those working tokens with its own.
 
 ## Install
 
@@ -73,11 +86,18 @@ qonnect
 Open that address. Your Connect devices appear in the dropdown at the bottom right as soon as
 they announce themselves.
 
+A HEOS device never registers itself with the Qobuz cloud. It advertises `_qobuz-connect._tcp` on
+the LAN and waits for an app to hand it a session, so qonnect looks for one and offers it the
+session -- but see the catch under Status: for playback, let the official app hand over first.
+
 A Denon or Marantz device with HEOS Built-in needs a current firmware before it speaks Qobuz
 Connect — on the PM7000N, HEOS firmware 3.67.460 or newer.
 
 ## Notes
 
+- **Auto standby.** A sleeping device still answers on the LAN and still accepts a handover; it
+  simply never joins and never plays. Hours of confusing symptoms come from this. Turn auto
+  standby off while testing.
 - **One token per socket.** The Qobuz cloud serves one connection per token. Running `qonnect`
   and the Qobuz phone app on the same account at the same time will evict one of them.
 - **`qonnect` also announces itself as a renderer**, because joining a session always does. It

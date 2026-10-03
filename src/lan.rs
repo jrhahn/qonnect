@@ -83,10 +83,13 @@ async fn in_session(qobuz: &Qobuz, device: &Device) -> Option<String> {
 /// The device validates the body strictly: both tokens need an endpoint, the expiry is in
 /// seconds, and any field it does not know makes it answer `400 Invalid request structure`.
 pub async fn hand_over(qobuz: &Qobuz, device: &Device, session_id: &str) -> Result<(), String> {
-    // Handing a session to a device that already has it makes it tear the connection down and
-    // build it up again, which is how it ends up wedged.
-    if in_session(qobuz, device).await.as_deref() == Some(session_id) {
-        tracing::debug!(name = %device.name, "already in this session");
+    // Never take a device that is already in a session. Our tokens come from the web player,
+    // which is no Qobuz Connect controller: a device holding them joins, fails every stream with
+    // "Too many playback errors" and drops out. A device that an official app has handed a
+    // session to holds tokens that do stream, and this session is the account's either way, so
+    // leave it alone and control it as it is.
+    if let Some(current) = in_session(qobuz, device).await {
+        tracing::debug!(name = %device.name, session = %current, "already in a session");
         return Ok(());
     }
     let token = qobuz.connect_token().await?;
