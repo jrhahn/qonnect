@@ -1,18 +1,30 @@
-//! `qonnect login`: trades an email and a password for the two values the API wants on every
-//! call, and writes them to the config file.
+//! `qonnect login`: the browser redirect the Qobuz web player uses, run against a listener of
+//! our own.
 //!
-//! The app id is not a secret: the web player ships it in its bundle, which is where this reads
-//! it from, so a new one is picked up whenever Qobuz rotates it.
+//! Qobuz dropped password logins — `user/login` with an email and an md5 answers 401 for every
+//! shape. What is left is `signin/oauth`: send the browser there, it comes back to a redirect
+//! url with a code, and the code buys a user auth token. The password never passes through here.
 
+use std::collections::HashMap;
 use std::io::Write as _;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::time::Duration;
 
+use axum::extract::{Query, State};
+use axum::response::Html;
+use axum::Router;
 use reqwest::Client;
 use serde_json::Value;
+use tokio::sync::oneshot;
 
 const LOGIN_PAGE: &str = "https://play.qobuz.com/login";
+const API: &str = "https://www.qobuz.com/api.json/0.2";
+const SIGNIN: &str = "https://www.qobuz.com/signin/oauth";
 /// Where the production app id sits in the bundle, past the integration and recette ones.
 const PRODUCTION_APP_ID: &str = "production:{api:{appId:\"";
+/// The web player ships this constant and hands it back with the code.
+const PRIVATE_KEY: &str = "6lz8C03UDIC7";
 /// Varnish answers some clients with a 403, so look like the browser the bundle is written for.
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
@@ -26,10 +38,8 @@ pub async fn run(config: &Path) -> Result<(), String> {
     let app_id = app_id(&client).await?;
     println!("app id {app_id}, from the web player bundle");
 
-    let email = prompt("Qobuz email: ")?;
-    let password = rpassword::prompt_password("Qobuz password: ").map_err(|err| err.to_string())?;
-
-    let token = user_auth_token(&client, &app_id, &email, &password).await?;
+    let (code, redirect) = authorize(&app_id).await?;
+    let token = exchange(&client, &app_id, &code, &redirect).await?;
     write(config, &app_id, &token)?;
     println!("written to {}", config.display());
     Ok(())
@@ -37,10 +47,10 @@ pub async fn run(config: &Path) -> Result<(), String> {
 
 /// Reads `appId` out of the web player bundle the login page points at.
 async fn app_id(client: &Client) -> Result<String, String> {
-    let page = get(client, LOGIN_PAGE).await?;
+    let page = fetch(client, LOGIN_PAGE).await?;
     let bundle = between(&page, "/resources/", "/bundle.js")
         .ok_or("no bundle in the login page, the web player has changed")?;
-    let bundle = get(client, &format!("https://play.qobuz.com/resources/{bundle}/bundle.js")).await?;
+    let bundle = fetch(client, &format!("https://play.qobuz.com/resources/{bundle}/bundle.js")).await?;
     // The bundle carries one app id per environment and the integration one comes first, so
     // anchor on production rather than taking the first match.
     between(&bundle, PRODUCTION_APP_ID, "\"")
@@ -49,20 +59,83 @@ async fn app_id(client: &Client) -> Result<String, String> {
         .ok_or_else(|| "no production appId in the bundle, the web player has changed".to_owned())
 }
 
-async fn user_auth_token(
+/// Serves one redirect on a port of its own and sends the browser to Qobuz. Returns the code and
+/// the redirect url it came back to, which the exchange has to repeat.
+async fn authorize(app_id: &str) -> Result<(String, String), String> {
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .map_err(|err| format!("cannot listen for the redirect: {err}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|err| err.to_string())?
+        .port();
+    let redirect = format!("http://127.0.0.1:{port}/oauth/callback");
+
+    let (tx, rx) = oneshot::channel();
+    let router = Router::new()
+        .route("/oauth/callback", axum::routing::get(callback))
+        .with_state(std::sync::Arc::new(std::sync::Mutex::new(Some(tx))));
+
+    let url = format!(
+        "{SIGNIN}?ext_app_id={app_id}&redirect_url={}",
+        encode(&redirect)
+    );
+    println!("\nOpening {url}\n\nIf no browser opens, paste that into one.");
+    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+
+    let server = axum::serve(listener, router);
+    let code = tokio::select! {
+        result = server => return Err(result.map_or_else(
+            |err| format!("the redirect listener failed: {err}"),
+            |()| "the redirect listener stopped".to_owned(),
+        )),
+        code = rx => code.map_err(|_| "no code came back".to_owned())?,
+        () = sleep(Duration::from_secs(300)) => {
+            return Err("no redirect within five minutes".to_owned())
+        }
+    };
+    code.map(|code| (code, redirect))
+}
+
+type Sender = std::sync::Arc<std::sync::Mutex<Option<oneshot::Sender<Result<String, String>>>>>;
+
+/// What Qobuz redirects the browser to once the user has signed in.
+async fn callback(State(sender): State<Sender>, Query(query): Query<HashMap<String, String>>) -> Html<&'static str> {
+    let result = query
+        .get("code")
+        .cloned()
+        .ok_or_else(|| match query.get("error") {
+            Some(error) => format!("Qobuz sent back an error: {error}"),
+            None => "the redirect carried no code".to_owned(),
+        });
+    let ok = result.is_ok();
+    if let Ok(mut slot) = sender.lock() {
+        if let Some(sender) = slot.take() {
+            let _ = sender.send(result);
+        }
+    }
+    Html(if ok {
+        "<title>qonnect</title><p>Signed in. You can close this tab."
+    } else {
+        "<title>qonnect</title><p>No code in the redirect. Check the terminal."
+    })
+}
+
+/// Trades the code for a user auth token.
+async fn exchange(
     client: &Client,
     app_id: &str,
-    email: &str,
-    password: &str,
+    code: &str,
+    redirect: &str,
 ) -> Result<String, String> {
-    let digest = format!("{:x}", md5::compute(password));
     let response = client
-        .get("https://www.qobuz.com/api.json/0.2/user/login")
+        .get(format!("{API}/oauth/callback"))
         .header("X-App-Id", app_id)
         .query(&[
+            ("code", code),
+            ("private_key", PRIVATE_KEY),
             ("app_id", app_id),
-            ("email", email),
-            ("password", &digest),
+            ("redirect_url", redirect),
         ])
         .send()
         .await
@@ -73,17 +146,18 @@ async fn user_auth_token(
         .json()
         .await
         .map_err(|err| format!("{status}, and the answer was not JSON: {err}"))?;
-    if !status.is_success() {
-        let message = body
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("no reason given");
-        return Err(format!("login refused ({status}): {message}"));
-    }
-    body.get("user_auth_token")
-        .and_then(Value::as_str)
+    // The web player reads a token and a user id out of this; take whichever name it arrives under.
+    ["user_auth_token", "token"]
+        .iter()
+        .find_map(|key| body.get(key).and_then(Value::as_str))
         .map(str::to_owned)
-        .ok_or_else(|| "no user_auth_token in the answer".to_owned())
+        .ok_or_else(|| {
+            let message = body
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("no token and no reason in the answer");
+            format!("the code was refused ({status}): {message}")
+        })
 }
 
 /// Replaces the credentials and leaves every other line of an existing config alone.
@@ -113,7 +187,11 @@ fn write(config: &Path, app_id: &str, token: &str) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
-async fn get(client: &Client, url: &str) -> Result<String, String> {
+async fn sleep(duration: Duration) {
+    tokio::time::sleep(duration).await;
+}
+
+async fn fetch(client: &Client, url: &str) -> Result<String, String> {
     client
         .get(url)
         .send()
@@ -125,14 +203,16 @@ async fn get(client: &Client, url: &str) -> Result<String, String> {
         .map_err(|err| err.to_string())
 }
 
-fn prompt(label: &str) -> Result<String, String> {
-    print!("{label}");
-    std::io::stdout().flush().map_err(|err| err.to_string())?;
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .map_err(|err| err.to_string())?;
-    Ok(line.trim().to_owned())
+/// Percent encoding for a url that goes in a query parameter.
+fn encode(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                char::from(byte).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }
 
 /// The text between two markers, searching from the first.
@@ -144,7 +224,7 @@ fn between<'a>(haystack: &'a str, open: &str, close: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{between, PRODUCTION_APP_ID};
+    use super::{between, encode, PRODUCTION_APP_ID};
 
     #[test]
     fn reads_markers_and_survives_missing_ones() {
@@ -153,9 +233,15 @@ mod tests {
         // The integration app id comes first in the real bundle, production is the one we want.
         assert_eq!(between(&bundle, "appId:\"", "\""), Some("377257687"));
         assert_eq!(between(&bundle, PRODUCTION_APP_ID, "\""), Some("798273057"));
-        assert_eq!(between("<a href=/resources/8.2.0-b034/bundle.js>", "/resources/", "/bundle.js"),
-                   Some("8.2.0-b034"));
         assert_eq!(between(&bundle, "appId:\"", "@"), None);
         assert_eq!(between(&bundle, "nothing", "\""), None);
+    }
+
+    #[test]
+    fn encodes_a_redirect_url() {
+        assert_eq!(
+            encode("http://127.0.0.1:7777/oauth/callback"),
+            "http%3A%2F%2F127.0.0.1%3A7777%2Foauth%2Fcallback"
+        );
     }
 }

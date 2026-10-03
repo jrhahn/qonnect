@@ -35,13 +35,18 @@ the protobuf schema ships generated, so `protoc` is not needed.
 qonnect login
 ```
 
-It reads the production app id out of the web player bundle, asks for your email and password,
-and writes `~/.config/qonnect/config` with mode 600. Only the token is stored; the password is
-not kept.
+It reads the production app id out of the web player bundle, opens your browser at the Qobuz
+sign-in page, catches the redirect on a local port, trades the code for a user auth token and
+writes `~/.config/qonnect/config` with mode 600. Your password never passes through qonnect; the
+browser handles the sign-in, exactly as it does for the web player.
 
-If you would rather not hand over the password, take the two values from the browser instead:
-open <https://play.qobuz.com>, developer tools, tab **Network**, pick a request to
-`www.qobuz.com/api.json/0.2/...` and copy the `X-App-Id` and `X-User-Auth-Token` request headers.
+Qobuz no longer accepts password logins over the API — `user/login` with an email and an md5
+answers `401 User authentication is required` for every shape of the request. The browser
+redirect is what the web player itself uses.
+
+To skip the flow, take the two values out of the browser instead: open <https://play.qobuz.com>,
+developer tools, tab **Network**, pick a request to `www.qobuz.com/api.json/0.2/...` and copy the
+`X-App-Id` and `X-User-Auth-Token` request headers.
 
 ```ini
 app_id = 798273057
