@@ -12,7 +12,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use axum::extract::{Query, State};
-use axum::response::Html;
+use axum::response::{Html, IntoResponse as _};
 use axum::Router;
 use reqwest::Client;
 use serde_json::Value;
@@ -72,8 +72,10 @@ async fn authorize(app_id: &str) -> Result<(String, String), String> {
     let redirect = format!("http://127.0.0.1:{port}/oauth/callback");
 
     let (tx, rx) = oneshot::channel();
+    // A fallback, not a route: Qobuz is free to come back to any path, and a 404 would lose the
+    // code without a word.
     let router = Router::new()
-        .route("/oauth/callback", axum::routing::get(callback))
+        .fallback(callback)
         .with_state(std::sync::Arc::new(std::sync::Mutex::new(Some(tx))));
 
     let url = format!(
@@ -99,26 +101,52 @@ async fn authorize(app_id: &str) -> Result<(String, String), String> {
 
 type Sender = std::sync::Arc<std::sync::Mutex<Option<oneshot::Sender<Result<String, String>>>>>;
 
-/// What Qobuz redirects the browser to once the user has signed in.
-async fn callback(State(sender): State<Sender>, Query(query): Query<HashMap<String, String>>) -> Html<&'static str> {
-    let result = query
-        .get("code")
-        .cloned()
-        .ok_or_else(|| match query.get("error") {
-            Some(error) => format!("Qobuz sent back an error: {error}"),
-            None => "the redirect carried no code".to_owned(),
-        });
-    let ok = result.is_ok();
+/// What Qobuz redirects the browser to once the user has signed in. Takes the code under any of
+/// the names it has been seen under, and asks the browser for the fragment when the query has
+/// nothing, since a `#code=...` never reaches a server on its own.
+async fn callback(
+    State(sender): State<Sender>,
+    uri: axum::http::Uri,
+    Query(query): Query<HashMap<String, String>>,
+) -> axum::response::Response {
+    println!("redirect: {uri}");
+
+    if let Some(code) = ["code", "authorization_code", "auth_code", "token"]
+        .iter()
+        .find_map(|key| query.get(*key))
+    {
+        finish(&sender, Ok(code.clone()));
+        return Html("<title>qonnect</title><p>Signed in. You can close this tab.").into_response();
+    }
+    if let Some(error) = query.get("error").or_else(|| query.get("error_description")) {
+        finish(&sender, Err(format!("Qobuz sent back an error: {error}")));
+        return Html("<title>qonnect</title><p>Qobuz refused. Check the terminal.")
+            .into_response();
+    }
+    if query.contains_key("qonnect_fragment") {
+        finish(
+            &sender,
+            Err(format!("the redirect carried no code, in neither the query nor the fragment: {uri}")),
+        );
+        return Html("<title>qonnect</title><p>No code in the redirect. Check the terminal.")
+            .into_response();
+    }
+    // Nothing in the query: bounce the fragment back as one, then decide.
+    Html(FRAGMENT_BOUNCE).into_response()
+}
+
+/// A fragment never reaches the server, so let the browser replay it as a query.
+const FRAGMENT_BOUNCE: &str = r"<title>qonnect</title><p>Signing in…<script>
+const hash = location.hash.slice(1);
+location.replace(location.pathname + '?qonnect_fragment=1' + (hash ? '&' + hash : ''));
+</script>";
+
+fn finish(sender: &Sender, result: Result<String, String>) {
     if let Ok(mut slot) = sender.lock() {
         if let Some(sender) = slot.take() {
             let _ = sender.send(result);
         }
     }
-    Html(if ok {
-        "<title>qonnect</title><p>Signed in. You can close this tab."
-    } else {
-        "<title>qonnect</title><p>No code in the redirect. Check the terminal."
-    })
 }
 
 /// Trades the code for a user auth token.
