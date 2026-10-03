@@ -44,7 +44,7 @@ async fn main() {
 
     if std::env::args().nth(1).as_deref() == Some("login") {
         let Some(path) = Config::path() else {
-            eprintln!("no HOME and no XDG_CONFIG_HOME, nowhere to write the config");
+            eprintln!("no HOME, XDG_CONFIG_HOME or APPDATA, nowhere to write the config");
             std::process::exit(1);
         };
         let wanted = std::env::args().nth(2);
@@ -112,7 +112,7 @@ struct Config {
 }
 
 impl Config {
-    /// Environment first, then `$XDG_CONFIG_HOME/qonnect/config`, a file of `key = value` lines.
+    /// Environment first, then the config file, a file of `key = value` lines.
     fn load() -> Result<Self, String> {
         let file = Self::path().and_then(|path| std::fs::read_to_string(path).ok());
         let mut values: HashMap<String, String> = HashMap::new();
@@ -147,10 +147,12 @@ impl Config {
         })
     }
 
+    /// `$XDG_CONFIG_HOME/qonnect/config`, else `~/.config/qonnect/config`, else `%APPDATA%`.
     fn path() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))?;
         Some(base.join("qonnect").join("config"))
     }
 }

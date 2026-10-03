@@ -42,6 +42,11 @@ nix build && ./result/bin/qonnect
 Without Nix, `cargo build --release` is enough. There are no C dependencies — TLS is rustls and
 the protobuf schema ships generated, so `protoc` is not needed.
 
+Linux, macOS and Windows: nothing here is tied to one of them. Only Linux is tested, because that
+is the machine it was written on and the one with no Qobuz app of its own. The config lives at
+`$XDG_CONFIG_HOME/qonnect/config`, else `~/.config/qonnect/config`, else `%APPDATA%\qonnect\config`,
+and the sign-in opens a browser with whichever of `xdg-open`, `open` or `start` the system has.
+
 ## Configure
 
 ```sh

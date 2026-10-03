@@ -95,7 +95,7 @@ async fn authorize(app_id: &str) -> Result<(String, String), String> {
         encode(&redirect)
     );
     println!("\nOpening {url}\n\nIf no browser opens, paste that into one.");
-    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    open_browser(&url);
 
     let server = axum::serve(listener, router);
     let code = tokio::select! {
@@ -109,6 +109,24 @@ async fn authorize(app_id: &str) -> Result<(String, String), String> {
         }
     };
     code.map(|code| (code, redirect))
+}
+
+/// Whichever of these the system has. Tried in order rather than picked by `cfg`, so there is no
+/// branch here that only compiles on a machine nobody has to hand.
+fn open_browser(url: &str) {
+    for (command, leading) in [
+        ("xdg-open", None),           // Linux
+        ("open", None),               // macOS
+        ("cmd", Some(["/c", "start", ""])), // Windows, where start needs an empty title first
+    ] {
+        let mut process = std::process::Command::new(command);
+        if let Some(leading) = leading {
+            process.args(leading);
+        }
+        if process.arg(url).spawn().is_ok() {
+            return;
+        }
+    }
 }
 
 type Sender = std::sync::Arc<std::sync::Mutex<Option<oneshot::Sender<Result<String, String>>>>>;
