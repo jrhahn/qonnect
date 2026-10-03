@@ -62,12 +62,35 @@ pub async fn browse(window: Duration) -> Result<Vec<Device>, String> {
     Ok(devices)
 }
 
+/// The session the device says it is in, if it says anything.
+async fn in_session(qobuz: &Qobuz, device: &Device) -> Option<String> {
+    let body: serde_json::Value = qobuz
+        .client()
+        .get(format!("{}/get-connect-info", device.base))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let id = body.get("current_session_id")?.as_str()?;
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
 /// Hands a device the session and the tokens to join it with.
 ///
 /// The device validates the body strictly: both tokens need an endpoint, the expiry is in
 /// seconds, and any field it does not know makes it answer `400 Invalid request structure`.
 pub async fn hand_over(qobuz: &Qobuz, device: &Device, session_id: &str) -> Result<(), String> {
+    // Handing a session to a device that already has it makes it tear the connection down and
+    // build it up again, which is how it ends up wedged.
+    if in_session(qobuz, device).await.as_deref() == Some(session_id) {
+        tracing::debug!(name = %device.name, "already in this session");
+        return Ok(());
+    }
     let token = qobuz.connect_token().await?;
+    let api = qobuz.api_token().await?;
     let payload = json!({
         "session_id": session_id,
         "jwt_qconnect": {
@@ -77,8 +100,8 @@ pub async fn hand_over(qobuz: &Qobuz, device: &Device, session_id: &str) -> Resu
         },
         "jwt_api": {
             "endpoint": API_ENDPOINT,
-            "jwt": qobuz.user_auth_token(),
-            "exp": token.expires,
+            "jwt": api.jwt,
+            "exp": api.expires,
         },
         "become_active": true,
     });

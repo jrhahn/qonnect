@@ -154,6 +154,11 @@ fn ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// How long to wait before offering the session to a silent device again, and the ceiling that
+/// wait grows to.
+const FIRST_RETRY: Duration = Duration::from_secs(20);
+const LAST_RETRY: Duration = Duration::from_secs(600);
+
 /// What the HTTP layer asks of the session.
 #[derive(Debug)]
 pub enum Cmd {
@@ -224,8 +229,12 @@ async fn run(
         let _ = session.ask_queue_state();
         // Which queue item to start once the server has assigned the ids.
         let mut start_at: Option<u32> = None;
-        // A device that is asleep answers the handover and never joins, so keep offering it.
-        let mut sweep = tokio::time::interval(Duration::from_secs(30));
+        // A device that is asleep answers the handover and never joins, so offer it again --
+        // but backing off, because every offer costs the device a reconnection.
+        let mut backoff = FIRST_RETRY;
+        let mut retry_at = tokio::time::Instant::now();
+        // Renderers do not report their position on their own, so ask.
+        let mut poll = tokio::time::interval(Duration::from_secs(5));
 
         loop {
             tokio::select! {
@@ -234,6 +243,9 @@ async fn run(
                     tracing::debug!(?event);
                     let known = state.active;
                     state.apply(&event);
+                    if !state.renderers.is_empty() {
+                        backoff = FIRST_RETRY;
+                    }
                     state.session_id = hyphenated(session.session_uuid());
 
                     // LoadTracks only fills the queue; the chosen track still has to be started,
@@ -256,11 +268,18 @@ async fn run(
                     }
                     let _ = state_tx.send(Arc::new(state.clone()));
                 }
+                _ = poll.tick(), if state.active.is_some() => {
+                    if let Some(id) = state.active {
+                        let _ = session.ask_renderer_state(id);
+                    }
+                }
                 // A LAN device stays invisible until it is handed the session.
-                _ = sweep.tick(), if state.renderers.is_empty() => {
+                () = tokio::time::sleep_until(retry_at), if state.renderers.is_empty() => {
                     if let Some(session_id) = state.session_id.clone() {
                         spawn_handover(qobuz.clone(), session_id);
                     }
+                    retry_at = tokio::time::Instant::now() + backoff;
+                    backoff = (backoff * 2).min(LAST_RETRY);
                 }
                 cmd = rx.recv() => {
                     let Some(cmd) = cmd else { return };

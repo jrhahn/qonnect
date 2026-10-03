@@ -100,8 +100,34 @@ impl Qobuz {
         })
     }
 
-    pub fn user_auth_token(&self) -> &str {
-        &self.user_auth_token
+    /// The bearer token a device needs to talk to the Qobuz API on its own. The user auth token
+    /// is not it: a device handed that one holds the queue and reports itself as playing, but
+    /// never resolves a stream and sits at position zero.
+    pub async fn api_token(&self) -> Result<Token, String> {
+        let body: Value = self
+            .client
+            .post(format!("{API}/qws/refreshToken"))
+            .header("X-App-Id", &self.app_id)
+            .header("X-User-Auth-Token", &self.user_auth_token)
+            .form(&[("jwt", "jwt_api")])
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|err| err.to_string())?
+            .json()
+            .await
+            .map_err(|err| err.to_string())?;
+        let token = body
+            .get("jwt_api")
+            .ok_or_else(|| format!("no jwt_api in the answer: {body}"))?;
+        Ok(Token {
+            endpoint: String::new(),
+            jwt: field(token, "jwt")?.to_owned(),
+            expires: token
+                .get("exp")
+                .and_then(Value::as_u64)
+                .ok_or("no exp in the token")?,
+        })
     }
 
     pub fn client(&self) -> &Client {
