@@ -10,7 +10,7 @@ use std::time::Duration;
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use serde_json::json;
 
-use crate::qobuz::Qobuz;
+use crate::qobuz::{Qobuz, Token};
 
 const SERVICE: &str = "_qobuz-connect._tcp.local.";
 /// Where the device should talk to the Qobuz API with the token we hand it.
@@ -62,6 +62,26 @@ pub async fn browse(window: Duration) -> Result<Vec<Device>, String> {
     Ok(devices)
 }
 
+/// What the device wants to hear. Both tokens carry an endpoint, the expiry is in seconds, and
+/// there is nothing else: it answers `400 Invalid request structure` to any field it does not
+/// know.
+fn payload(session_id: &str, qconnect: &Token, api: &Token) -> serde_json::Value {
+    json!({
+        "session_id": session_id,
+        "jwt_qconnect": {
+            "endpoint": qconnect.endpoint,
+            "jwt": qconnect.jwt,
+            "exp": qconnect.expires,
+        },
+        "jwt_api": {
+            "endpoint": API_ENDPOINT,
+            "jwt": api.jwt,
+            "exp": api.expires,
+        },
+        "become_active": true,
+    })
+}
+
 /// The session the device says it is in, if it says anything.
 async fn in_session(qobuz: &Qobuz, device: &Device) -> Option<String> {
     let body: serde_json::Value = qobuz
@@ -99,20 +119,7 @@ pub async fn hand_over(
     }
     let token = qobuz.connect_token().await?;
     let api = qobuz.api_token().await?;
-    let payload = json!({
-        "session_id": session_id,
-        "jwt_qconnect": {
-            "endpoint": token.endpoint,
-            "jwt": token.jwt,
-            "exp": token.expires,
-        },
-        "jwt_api": {
-            "endpoint": API_ENDPOINT,
-            "jwt": api.jwt,
-            "exp": api.expires,
-        },
-        "become_active": true,
-    });
+    let payload = payload(session_id, &token, &api);
 
     let response = qobuz
         .client()
@@ -130,5 +137,94 @@ pub async fn hand_over(
         Ok(None)
     } else {
         Err(format!("{} refused the session ({status}): {body}", device.name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::{json, Value};
+
+    use super::{hand_over, payload, Device};
+    use crate::qobuz::{Qobuz, Token};
+
+    fn token(endpoint: &str, jwt: &str) -> Token {
+        Token {
+            endpoint: endpoint.to_owned(),
+            jwt: jwt.to_owned(),
+            expires: 1_791_018_336,
+        }
+    }
+
+    /// A device that only answers `get-connect-info`, saying which session it is in.
+    async fn device_in(session: &'static str) -> Device {
+        let router = Router::new().route(
+            "/qobuz/get-connect-info",
+            get(move || async move {
+                Json(json!({"app_id": "120805696", "current_session_id": session}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        Device {
+            name: "Marantz PM7000N".to_owned(),
+            base: format!("http://127.0.0.1:{port}/qobuz"),
+        }
+    }
+
+    #[test]
+    fn builds_the_body_the_device_accepts() {
+        let body = payload(
+            "ec13a53a-e766-4fbc-8d2a-9b7179ddace0",
+            &token("wss://qws-eu-prod.qobuz.com/ws", "ey.qws"),
+            &token("", "ey.api"),
+        );
+
+        // Exactly these four fields: the device refuses a body carrying anything else.
+        let fields: Vec<&String> = body.as_object().expect("an object").keys().collect();
+        assert_eq!(
+            fields,
+            ["become_active", "jwt_api", "jwt_qconnect", "session_id"]
+        );
+
+        // Both tokens need an endpoint, and jwt_api does not bring one of its own.
+        assert_eq!(body["jwt_qconnect"]["endpoint"], "wss://qws-eu-prod.qobuz.com/ws");
+        assert_eq!(body["jwt_api"]["endpoint"], "https://www.qobuz.com/api.json/0.2");
+        assert_eq!(body["jwt_api"]["jwt"], "ey.api");
+        assert_eq!(body["become_active"], Value::Bool(true));
+
+        // Seconds, as a number: milliseconds are refused.
+        assert_eq!(body["jwt_qconnect"]["exp"], 1_791_018_336_u64);
+        assert!(body["jwt_api"]["exp"].is_u64());
+    }
+
+    #[tokio::test]
+    async fn reports_a_device_that_is_in_another_session() {
+        let device = device_in("5494e0ac-f123-42a8-b2b9-9666e5a53f9c").await;
+        // Credentials are never used: the handover stops before minting anything.
+        let qobuz = Qobuz::new("app".to_owned(), "token".to_owned());
+
+        let other = hand_over(&qobuz, &device, "ec13a53a-e766-4fbc-8d2a-9b7179ddace0")
+            .await
+            .expect("the device answered");
+        assert_eq!(other.as_deref(), Some("5494e0ac-f123-42a8-b2b9-9666e5a53f9c"));
+    }
+
+    #[tokio::test]
+    async fn leaves_a_device_that_is_already_in_this_session_alone() {
+        let session = "ec13a53a-e766-4fbc-8d2a-9b7179ddace0";
+        let device = device_in(session).await;
+        let qobuz = Qobuz::new("app".to_owned(), "token".to_owned());
+
+        // Nothing to report and nothing done: handing it over again would cost it a reconnection,
+        // and would replace tokens that may be the only ones able to stream.
+        let other = hand_over(&qobuz, &device, session).await.expect("answered");
+        assert_eq!(other, None);
     }
 }

@@ -17,11 +17,46 @@ pub struct Token {
     pub expires: u64,
 }
 
-fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
-    value
+/// Spelled out rather than derived: the jwt is a credential and has no business in a log line.
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Token")
+            .field("endpoint", &self.endpoint)
+            .field("jwt", &format_args!("<{} chars>", self.jwt.len()))
+            .field("expires", &self.expires)
+            .finish()
+    }
+}
+
+/// Whether the answer carries the endpoint to talk to, as `jwt_qws` does and `jwt_api` does not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Endpoint {
+    Required,
+    None,
+}
+
+/// Reads one token out of an answer of the token endpoints.
+fn token(body: &Value, key: &str, endpoint: Endpoint) -> Result<Token, String> {
+    let token = body
         .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("no {key} in the token"))
+        .ok_or_else(|| format!("no {key} in the answer: {body}"))?;
+    let field = |name: &str| {
+        token
+            .get(name)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("no {name} in {key}"))
+    };
+    Ok(Token {
+        endpoint: match endpoint {
+            Endpoint::Required => field("endpoint")?.to_owned(),
+            Endpoint::None => String::new(),
+        },
+        jwt: field("jwt")?.to_owned(),
+        expires: token
+            .get("exp")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("no exp in {key}"))?,
+    })
 }
 
 #[derive(Clone)]
@@ -87,17 +122,7 @@ impl Qobuz {
             .json()
             .await
             .map_err(|err| err.to_string())?;
-        let token = body
-            .get("jwt_qws")
-            .ok_or_else(|| format!("no jwt_qws in the answer: {body}"))?;
-        Ok(Token {
-            endpoint: field(token, "endpoint")?.to_owned(),
-            jwt: field(token, "jwt")?.to_owned(),
-            expires: token
-                .get("exp")
-                .and_then(Value::as_u64)
-                .ok_or("no exp in the token")?,
-        })
+        token(&body, "jwt_qws", Endpoint::Required)
     }
 
     /// The bearer token a device needs to talk to the Qobuz API on its own. The user auth token
@@ -117,17 +142,7 @@ impl Qobuz {
             .json()
             .await
             .map_err(|err| err.to_string())?;
-        let token = body
-            .get("jwt_api")
-            .ok_or_else(|| format!("no jwt_api in the answer: {body}"))?;
-        Ok(Token {
-            endpoint: String::new(),
-            jwt: field(token, "jwt")?.to_owned(),
-            expires: token
-                .get("exp")
-                .and_then(Value::as_u64)
-                .ok_or("no exp in the token")?,
-        })
+        token(&body, "jwt_api", Endpoint::None)
     }
 
     pub fn client(&self) -> &Client {
@@ -147,5 +162,47 @@ impl Qobuz {
             .error_for_status()?
             .json()
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{token, Endpoint};
+
+    #[test]
+    fn reads_the_answers_of_both_token_endpoints() {
+        // qws/createToken, jwt=jwt_qws
+        let body = json!({"jwt_qws": {"exp": 1_791_018_075_u64, "jwt": "ey.qws",
+                                      "endpoint": "wss://qws-eu-prod.qobuz.com/ws"}});
+        let qws = token(&body, "jwt_qws", Endpoint::Required).expect("a token");
+        assert_eq!(qws.endpoint, "wss://qws-eu-prod.qobuz.com/ws");
+        assert_eq!(qws.jwt, "ey.qws");
+        assert_eq!(qws.expires, 1_791_018_075);
+
+        // qws/refreshToken, jwt=jwt_api: a token, and no endpoint of its own
+        let body = json!({"jwt_api": {"exp": 1_791_021_401_u64, "jwt": "ey.api"}});
+        let api = token(&body, "jwt_api", Endpoint::None).expect("a token");
+        assert_eq!(api.jwt, "ey.api");
+        assert_eq!(api.expires, 1_791_021_401);
+        assert!(api.endpoint.is_empty());
+    }
+
+    #[test]
+    fn says_what_is_missing() {
+        // An error answer rather than a token, as the API gives for a bad argument.
+        let error = json!({"status": "error", "code": 400, "message": "Invalid argument: jwt"});
+        let err = token(&error, "jwt_qws", Endpoint::Required).expect_err("no token in there");
+        assert!(err.contains("no jwt_qws"), "{err}");
+
+        let no_endpoint = json!({"jwt_qws": {"jwt": "ey", "exp": 1_u64}});
+        let err = token(&no_endpoint, "jwt_qws", Endpoint::Required).expect_err("no endpoint");
+        assert!(err.contains("endpoint"), "{err}");
+
+        // A string expiry is not an expiry: the device wants seconds as a number.
+        let string_exp = json!({"jwt_api": {"jwt": "ey", "exp": "1791021401"}});
+        let err = token(&string_exp, "jwt_api", Endpoint::None).expect_err("exp is not a number");
+        assert!(err.contains("exp"), "{err}");
     }
 }
