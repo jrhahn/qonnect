@@ -1,0 +1,182 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qonnect</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #101013; --panel: #17171c; --line: #26262e;
+    --text: #e8e8ec; --dim: #8d8d99; --accent: #6ea8fe;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: grid;
+    grid-template-columns: 17rem 1fr; grid-template-rows: 1fr auto;
+    font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text);
+  }
+  aside { grid-row: 1; border-right: 1px solid var(--line); overflow-y: auto; padding: .75rem; }
+  main { grid-row: 1; overflow-y: auto; padding: .75rem 1rem; }
+  footer {
+    grid-column: 1 / -1; border-top: 1px solid var(--line); background: var(--panel);
+    display: flex; gap: .75rem; align-items: center; padding: .6rem .9rem; flex-wrap: wrap;
+  }
+  h2 { font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+       margin: 1rem 0 .35rem; }
+  h2:first-child { margin-top: 0; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: .3rem .45rem; border-radius: .3rem; cursor: pointer; }
+  li:hover { background: #ffffff10; }
+  li.on { background: var(--accent); color: #0b0b0f; }
+  .row { display: flex; gap: .6rem; align-items: baseline; }
+  .row .dim { color: var(--dim); font-size: .85em; margin-left: auto; white-space: nowrap; }
+  .track.on { color: var(--accent); font-weight: 600; }
+  input, select, button {
+    font: inherit; color: inherit; background: #ffffff0d;
+    border: 1px solid var(--line); border-radius: .3rem; padding: .3rem .55rem;
+  }
+  button { cursor: pointer; }
+  button:hover { background: #ffffff1a; }
+  input[type=range] { padding: 0; border: 0; background: none; width: 8rem; }
+  #search { width: 100%; }
+  #bar { flex: 1 1 12rem; height: .3rem; background: var(--line); border-radius: .2rem; cursor: pointer; }
+  #fill { height: 100%; width: 0; background: var(--accent); border-radius: .2rem; }
+  #status { color: var(--dim); font-size: .85em; }
+  .warn { color: #ffb3b3; }
+</style>
+
+<aside>
+  <input id="search" placeholder="Search Qobuz" autocomplete="off">
+  <h2>Playlists</h2>
+  <ul id="playlists"></ul>
+  <h2>Favourite albums</h2>
+  <ul id="albums"></ul>
+</aside>
+
+<main>
+  <h2 id="title">Pick a playlist</h2>
+  <ul id="tracks"></ul>
+</main>
+
+<footer>
+  <button id="prev" title="Previous">&#9198;</button>
+  <button id="toggle" title="Play / pause">&#9654;</button>
+  <button id="next" title="Next">&#9197;</button>
+  <span id="clock" class="dim">0:00</span>
+  <div id="bar"><div id="fill"></div></div>
+  <span id="clockEnd" class="dim">0:00</span>
+  <input id="volume" type="range" min="0" max="100" value="50" title="Volume">
+  <select id="renderers"><option value="">no device</option></select>
+  <span id="status">connecting…</span>
+</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const api = (path, body) => fetch(path, body
+  ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+  : undefined);
+const clock = ms => {
+  const total = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+};
+
+// Track metadata lives here only: the session speaks track ids, the browser knows the names.
+let listed = [];       // what is shown in the main pane, in order
+let state = {};        // last session state from the server
+let shown = 0;         // position extrapolated between reports
+let reportedAt = 0;
+
+async function load(path, pick, title) {
+  const response = await api(path);
+  if (!response.ok) { $('status').textContent = await response.text(); return; }
+  listed = pick(await response.json()) ?? [];
+  $('title').textContent = title;
+  renderTracks();
+}
+
+function renderTracks() {
+  const current = state.queue?.find(item => item.queue_item_id === state.current)?.track_id;
+  $('tracks').replaceChildren(...listed.map((track, index) => {
+    const li = document.createElement('li');
+    li.className = 'row track' + (track.id === current ? ' on' : '');
+    li.innerHTML = `<span>${index + 1}.</span><span>${esc(track.title)}</span>`
+      + `<span class="dim">${esc(track.artist)} · ${clock(track.duration * 1000)}</span>`;
+    li.onclick = () => api('/api/play', { track_ids: listed.map(t => t.id), position: index });
+    return li;
+  }));
+}
+
+const esc = text => String(text ?? '').replace(/[<&]/g, c => ({ '<': '&lt;', '&': '&amp;' }[c]));
+const asTrack = track => ({
+  id: track.id,
+  title: track.title,
+  duration: track.duration ?? 0,
+  artist: track.performer?.name ?? track.album?.artist?.name ?? track.artist?.name ?? '',
+});
+
+function sidebar(list, items, title, onclick) {
+  list.replaceChildren(...items.map(item => {
+    const li = document.createElement('li');
+    li.textContent = title(item);
+    li.onclick = () => { [...list.parentElement.querySelectorAll('li.on')].forEach(o => o.classList.remove('on'));
+                         li.classList.add('on'); onclick(item); };
+    return li;
+  }));
+}
+
+async function boot() {
+  const playlists = await (await api('/api/playlists')).json();
+  sidebar($('playlists'), playlists.playlists?.items ?? [], p => p.name, p =>
+    load(`/api/playlist/${p.id}`, j => (j.tracks?.items ?? []).map(asTrack), p.name));
+
+  const favourites = await (await api('/api/favorites')).json();
+  sidebar($('albums'), favourites.albums?.items ?? [], a => `${a.artist?.name ?? ''} — ${a.title}`, a =>
+    load(`/api/album/${a.id}`, j => (j.tracks?.items ?? []).map(t =>
+      asTrack({ ...t, artist: a.artist })), a.title));
+}
+
+$('search').addEventListener('change', event => {
+  const query = event.target.value.trim();
+  if (query) load(`/api/search?q=${encodeURIComponent(query)}`,
+    j => (j.tracks?.items ?? []).map(asTrack), `Search: ${query}`);
+});
+
+$('toggle').onclick = () => api('/api/transport', { action: state.playing ? 'pause' : 'play' });
+$('next').onclick = () => api('/api/transport', { action: 'next' });
+$('prev').onclick = () => api('/api/transport', { action: 'previous' });
+$('bar').onclick = event => {
+  const box = event.currentTarget.getBoundingClientRect();
+  const fraction = (event.clientX - box.left) / box.width;
+  api('/api/transport', { action: 'seek', position_ms: Math.round(fraction * state.duration_ms) });
+};
+$('volume').onchange = event => api('/api/volume', { volume: Number(event.target.value) });
+$('renderers').onchange = event => { if (event.target.value) api(`/api/renderer/${event.target.value}`); };
+
+new EventSource('/api/events').onmessage = message => {
+  const next = JSON.parse(message.data);
+  const requeued = JSON.stringify(next.queue) !== JSON.stringify(state.queue);
+  state = next;
+  shown = state.position_ms;
+  reportedAt = performance.now();
+
+  if ($('renderers').value !== String(state.active ?? '')) {
+    $('renderers').replaceChildren(...[{ id: '', name: 'no device' }, ...state.renderers]
+      .map(renderer => new Option(renderer.name, renderer.id)));
+    $('renderers').value = String(state.active ?? '');
+  }
+  $('toggle').innerHTML = state.playing ? '&#10073;&#10073;' : '&#9654;';
+  if (state.volume != null) $('volume').value = state.volume;
+  $('status').textContent = state.message ?? (state.connected ? 'connected' : 'reconnecting…');
+  $('status').className = state.message ? 'warn' : '';
+  if (requeued || state.current != null) renderTracks();
+};
+
+// Renderers report every few seconds; move the bar in between so it does not look stuck.
+setInterval(() => {
+  const at = state.playing ? shown + (performance.now() - reportedAt) : shown;
+  $('clock').textContent = clock(at);
+  $('clockEnd').textContent = clock(state.duration_ms ?? 0);
+  $('fill').style.width = state.duration_ms ? `${Math.min(100, at / state.duration_ms * 100)}%` : '0';
+}, 250);
+
+boot();
+</script>
