@@ -92,10 +92,21 @@ nix build && ./result/bin/qonnect
 ```
 
 Without Nix, `cargo build --release`. No C dependencies: TLS is rustls, and the protobuf schema
-ships generated, so `protoc` is not needed either. If `cargo` and `rustc` on your machine come
-from different places — a distribution cargo next to a rustup `rustc` shim, say — the build dies
-in a dependency with `E0514: compiled by an incompatible version of rustc`. `nix develop -c cargo
-build`, or `rustup run stable cargo build`, gives it a matching pair.
+ships generated, so `protoc` is not needed either.
+
+**If the build dies in `convert_case` with `E0514: compiled by an incompatible version of
+rustc`**, build it as:
+
+```sh
+RUSTUP_TOOLCHAIN=stable cargo build
+```
+
+`convert_case 0.10`, which arrives through `ratatui → crossterm → derive_more`, ships a
+`rust-toolchain.toml` pinning `channel = "1.83.0"` inside its published crate. A rustup `rustc`
+is a shim that obeys that file, so that one dependency gets built by 1.83 while everything around
+it is built by your real toolchain, and the two cannot read each other's metadata. Setting
+`RUSTUP_TOOLCHAIN` overrules the file. `nix develop -c cargo build` sidesteps it from the other
+side, with a toolchain that is no shim and reads no such file.
 
 Linux, macOS and Windows: nothing here is tied to one of them, though only Linux is tested. The
 browser opens with whichever of `xdg-open`, `open` or `start` exists, and the config lives at
