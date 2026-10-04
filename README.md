@@ -92,7 +92,10 @@ nix build && ./result/bin/qonnect
 ```
 
 Without Nix, `cargo build --release`. No C dependencies: TLS is rustls, and the protobuf schema
-ships generated, so `protoc` is not needed either.
+ships generated, so `protoc` is not needed either. If `cargo` and `rustc` on your machine come
+from different places — a distribution cargo next to a rustup `rustc` shim, say — the build dies
+in a dependency with `E0514: compiled by an incompatible version of rustc`. `nix develop -c cargo
+build`, or `rustup run stable cargo build`, gives it a matching pair.
 
 Linux, macOS and Windows: nothing here is tied to one of them, though only Linux is tested. The
 browser opens with whichever of `xdg-open`, `open` or `start` exists, and the config lives at
