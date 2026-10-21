@@ -4,6 +4,7 @@
 mod connect;
 mod lan;
 mod login;
+mod playlists;
 mod qobuz;
 mod tui;
 
@@ -65,6 +66,25 @@ async fn main() {
     };
 
     let qobuz = Qobuz::new(config.app_id, config.user_auth_token);
+    // Before the session: these only touch the catalogue and must not announce a device.
+    let args: Vec<String> = std::env::args().collect();
+    let done = match args.get(1).map(String::as_str) {
+        Some("dump") => Some(playlists::dump(&qobuz).await),
+        Some("add") => Some(match args.get(2) {
+            Some(id) => {
+                playlists::add(&qobuz, id, args.get(3).is_some_and(|a| a == "--dry-run")).await
+            }
+            None => Err("usage: qonnect add <playlist id> [--dry-run] < tracks".into()),
+        }),
+        _ => None,
+    };
+    if let Some(done) = done {
+        if let Err(err) = done {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let session = connect::spawn(qobuz.clone(), config.renderer);
 
     // The terminal is the default front end; the page is there for the other rooms.

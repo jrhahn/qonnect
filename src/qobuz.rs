@@ -163,6 +163,20 @@ impl Qobuz {
             .json()
             .await
     }
+
+    /// A form POST against the API, for the few calls that change the library.
+    pub async fn post(&self, path: &str, form: &[(&str, &str)]) -> Result<Value, reqwest::Error> {
+        self.client
+            .post(format!("{API}/{path}"))
+            .header("X-App-Id", &self.app_id)
+            .header("X-User-Auth-Token", &self.user_auth_token)
+            .form(form)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+    }
 }
 
 #[cfg(test)]

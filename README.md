@@ -60,6 +60,8 @@ If you know which app the native handover mints its tokens under, please open an
 qonnect login          # browser sign-in, writes the config
 qonnect                # the terminal UI
 qonnect serve          # the same thing as a page on http://127.0.0.1:7777
+qonnect dump > lib.json # every playlist with its tracks, as JSON
+qonnect add <id> < tracks # append `Artist - Title` lines to a playlist; --dry-run to look first
 ```
 
 The first time, and after the device has been off: open the Qobuz app on your phone, pick the
